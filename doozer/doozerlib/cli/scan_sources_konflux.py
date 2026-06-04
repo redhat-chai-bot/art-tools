@@ -1030,15 +1030,29 @@ class ConfigScanSources:
             # Resolve builder build NVR
             if builder.image:
                 builder_image_name = builder.image
+                stream_config = None
             elif builder.stream:
-                builder_image_name = self.runtime.resolve_stream(builder.stream).image
+                stream_config = self.runtime.resolve_stream(builder.stream)
+                builder_image_name = stream_config.image
             else:
                 raise IOError(f'Unable to determine builder or parent image pullspec from {builder}')
             builder_build_nvr = await self.get_builder_build_nvr(builder_image_name)
 
             if not builder_build_nvr:
                 if builder.stream:
-                    raise IOError(f'Unable to find nvr for {builder_image_name}')
+                    # Some stream images (e.g. RHCOS images from coreos-assembler) are
+                    # built outside the standard OSBS/Brew pipeline and lack the NVR
+                    # labels.  If the stream entry in streams.yml has
+                    # ``skip_nvr_check: true``, log a warning and skip instead of
+                    # crashing the entire scan.
+                    if stream_config and stream_config.skip_nvr_check:
+                        self.logger.warning(
+                            'Unable to find nvr for builder image %s (stream=%s) -- '
+                            'skipping builder change detection (skip_nvr_check is set)',
+                            builder_image_name, builder.stream,
+                        )
+                    else:
+                        raise IOError(f'Unable to find nvr for {builder_image_name}')
                 # If it's a direct image reference, skip it (likely an external/upstream image)
                 continue
 
