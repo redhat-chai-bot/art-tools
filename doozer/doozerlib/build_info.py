@@ -11,6 +11,7 @@ from artcommonlib.konflux.package_rpm_finder import PackageRpmFinder
 from artcommonlib.model import Model
 from artcommonlib.release_util import isolate_el_version_in_release
 from artcommonlib.rpm_utils import to_nevra
+from artcommonlib.util import should_honor_ignorable_repos
 
 import doozerlib
 from doozerlib import brew, util
@@ -150,25 +151,35 @@ class BrewImageInspector(ImageInspector):
             )
             return []
 
-        # Filter out ignorable repos (ART-14091)
-        # Ignorable repos (e.g., baseos, appstream) don't trigger rebuilds to avoid mass rebuilds
-        non_ignorable_repos = []
-        for repo_name in enabled_repos:
-            repo = group_repos[repo_name]
-            # Check if repo has scan_sources.ignorable set to true
-            if repo._data.get('scan_sources', {}).get('ignorable', False):
-                logger.info(f'Ignoring repo {repo_name} for RPM change detection (marked as ignorable)')
-            else:
-                non_ignorable_repos.append(repo_name)
+        # Filter out ignorable repos based on lifecycle phase and release schedule (ART-14091)
+        if should_honor_ignorable_repos(
+            self.runtime, force_ignore=getattr(self.runtime, 'ignore_all_ignorable_repos', False)
+        ):
+            non_ignorable_repos = []
+            for repo_name in enabled_repos:
+                repo = group_repos[repo_name]
+                # Check if repo has scan_sources.ignorable set to true
+                if repo._data.get('scan_sources', {}).get('ignorable', False):
+                    logger.info(
+                        f'Ignoring repo {repo_name} for RPM change detection in {meta.distgit_key} '
+                        f'(marked as ignorable and conditions allow skipping)'
+                    )
+                else:
+                    non_ignorable_repos.append(repo_name)
 
-        if not non_ignorable_repos:
+            if not non_ignorable_repos:
+                logger.info(
+                    "All enabled repos for %s are marked as ignorable and skipped; no RPM change detection needed",
+                    meta.distgit_key,
+                )
+                return []
+
+            enabled_repos = non_ignorable_repos
+        else:
             logger.info(
-                "All enabled repos for %s are marked as ignorable; skipping RPM change detection",
-                meta.distgit_key,
+                f"Lifecycle phase or release schedule requires processing all repos for {meta.distgit_key} "
+                f"(ignorable flag not honored)"
             )
-            return []
-
-        enabled_repos = non_ignorable_repos
 
         logger.info(
             "Fetching repodatas for enabled repos %s", ", ".join(f"{repo_name}-{arch}" for repo_name in enabled_repos)
@@ -773,25 +784,35 @@ class KonfluxBuildRecordInspector(BuildRecordInspector):
             )
             return {}
 
-        # Filter out ignorable repos (ART-14091)
-        # Ignorable repos (e.g., baseos, appstream) don't trigger rebuilds to avoid mass rebuilds
-        non_ignorable_repos = []
-        for repo_name in enabled_repos:
-            repo = group_repos[repo_name]
-            # Check if repo has scan_sources.ignorable set to true
-            if repo._data.get('scan_sources', {}).get('ignorable', False):
-                logger.info(f'Ignoring repo {repo_name} for RPM change detection (marked as ignorable)')
-            else:
-                non_ignorable_repos.append(repo_name)
+        # Filter out ignorable repos based on lifecycle phase and release schedule (ART-14091)
+        if should_honor_ignorable_repos(
+            self.runtime, force_ignore=getattr(self.runtime, 'ignore_all_ignorable_repos', False)
+        ):
+            non_ignorable_repos = []
+            for repo_name in enabled_repos:
+                repo = group_repos[repo_name]
+                # Check if repo has scan_sources.ignorable set to true
+                if repo._data.get('scan_sources', {}).get('ignorable', False):
+                    logger.info(
+                        f'Ignoring repo {repo_name} for RPM change detection in {meta.distgit_key} '
+                        f'(marked as ignorable and conditions allow skipping)'
+                    )
+                else:
+                    non_ignorable_repos.append(repo_name)
 
-        if not non_ignorable_repos:
+            if not non_ignorable_repos:
+                logger.info(
+                    "All enabled repos for %s are marked as ignorable and skipped; no RPM change detection needed",
+                    meta.distgit_key,
+                )
+                return {}
+
+            enabled_repos = non_ignorable_repos
+        else:
             logger.info(
-                "All enabled repos for %s are marked as ignorable; skipping RPM change detection",
-                meta.distgit_key,
+                f"Lifecycle phase or release schedule requires processing all repos for {meta.distgit_key} "
+                f"(ignorable flag not honored)"
             )
-            return {}
-
-        enabled_repos = non_ignorable_repos
 
         for arch in self._build_record.arches:
             repodatas = await asyncio.gather(
