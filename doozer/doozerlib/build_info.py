@@ -10,7 +10,7 @@ from artcommonlib.konflux.konflux_build_record import KonfluxBuildRecord
 from artcommonlib.konflux.package_rpm_finder import PackageRpmFinder
 from artcommonlib.model import Model
 from artcommonlib.release_util import isolate_el_version_in_release
-from artcommonlib.rpm_utils import to_nevra
+from artcommonlib.rpm_utils import parse_nvr, to_nevra
 from artcommonlib.util import should_honor_ignorable_repos
 
 import doozerlib
@@ -167,6 +167,22 @@ class BrewImageInspector(ImageInspector):
                 else:
                     non_ignorable_repos.append(repo_name)
 
+            # Per-image ignorable_repos filtering: also filter out repos listed in the image's
+            # scan_sources.ignorable_repos config (in addition to global filtering)
+            per_image_ignorable_repos = list(meta.config.get('scan_sources', {}).get('ignorable_repos', []))
+            if per_image_ignorable_repos:
+                filtered_repos = []
+                for repo_name in non_ignorable_repos:
+                    if repo_name in per_image_ignorable_repos:
+                        logger.info(
+                            "Ignoring repo %s for %s (per-image ignorable_repos config)",
+                            repo_name,
+                            meta.distgit_key,
+                        )
+                    else:
+                        filtered_repos.append(repo_name)
+                non_ignorable_repos = filtered_repos
+
             if not non_ignorable_repos:
                 logger.info(
                     "All enabled repos for %s are marked as ignorable and skipped; no RPM change detection needed",
@@ -195,6 +211,34 @@ class BrewImageInspector(ImageInspector):
         results = OutdatedRPMFinder().find_non_latest_rpms(
             rpms_to_check, repodatas, logger=cast(logging.Logger, logger)
         )
+
+        # Per-image ignorable_rpms filtering: filter out RPMs whose name matches entries
+        # in the image's scan_sources.ignorable_rpms config (only when safety valve allows)
+        if should_honor_ignorable_repos(
+            self.runtime, force_ignore=getattr(self.runtime, 'ignore_all_ignorable_repos', False)
+        ):
+            per_image_ignorable_rpms = list(meta.config.get('scan_sources', {}).get('ignorable_rpms', []))
+            if per_image_ignorable_rpms and results:
+                filtered_results = []
+                for installed_nevra, latest_nevra, repo_name in results:
+                    # Extract the package name from the installed NEVRA (name-epoch:version-release.arch)
+                    nevr = installed_nevra.rsplit(".", maxsplit=1)[0]
+                    rpm_name = parse_nvr(nevr)['name']
+                    if rpm_name in per_image_ignorable_rpms:
+                        logger.info(
+                            "Ignoring RPM %s for %s (per-image ignorable_rpms config)",
+                            rpm_name,
+                            meta.distgit_key,
+                        )
+                    else:
+                        filtered_results.append((installed_nevra, latest_nevra, repo_name))
+                results = filtered_results
+                logger.info(
+                    "After per-image RPM filtering, %d non-latest RPMs remain for %s",
+                    len(results),
+                    meta.distgit_key,
+                )
+
         return results
 
     def get_installed_rpm_dicts(self) -> List[Dict]:
@@ -785,9 +829,10 @@ class KonfluxBuildRecordInspector(BuildRecordInspector):
             return {}
 
         # Filter out ignorable repos based on lifecycle phase and release schedule (ART-14091)
-        if should_honor_ignorable_repos(
+        honor_ignorable = should_honor_ignorable_repos(
             self.runtime, force_ignore=getattr(self.runtime, 'ignore_all_ignorable_repos', False)
-        ):
+        )
+        if honor_ignorable:
             non_ignorable_repos = []
             for repo_name in enabled_repos:
                 repo = group_repos[repo_name]
@@ -799,6 +844,22 @@ class KonfluxBuildRecordInspector(BuildRecordInspector):
                     )
                 else:
                     non_ignorable_repos.append(repo_name)
+
+            # Per-image ignorable_repos filtering: also filter out repos listed in the image's
+            # scan_sources.ignorable_repos config (in addition to global filtering)
+            per_image_ignorable_repos = list(meta.config.get('scan_sources', {}).get('ignorable_repos', []))
+            if per_image_ignorable_repos:
+                filtered_repos = []
+                for repo_name in non_ignorable_repos:
+                    if repo_name in per_image_ignorable_repos:
+                        logger.info(
+                            "Ignoring repo %s for %s (per-image ignorable_repos config)",
+                            repo_name,
+                            meta.distgit_key,
+                        )
+                    else:
+                        filtered_repos.append(repo_name)
+                non_ignorable_repos = filtered_repos
 
             if not non_ignorable_repos:
                 logger.info(
@@ -814,6 +875,11 @@ class KonfluxBuildRecordInspector(BuildRecordInspector):
                 f"(ignorable flag not honored)"
             )
 
+        # Read per-image ignorable_rpms config once for use after finding non-latest RPMs
+        per_image_ignorable_rpms = (
+            list(meta.config.get('scan_sources', {}).get('ignorable_rpms', [])) if honor_ignorable else []
+        )
+
         for arch in self._build_record.arches:
             repodatas = await asyncio.gather(
                 *(group_repos[repo_name].get_repodata(arch) for repo_name in enabled_repos)
@@ -822,6 +888,30 @@ class KonfluxBuildRecordInspector(BuildRecordInspector):
             non_latest_rpms = OutdatedRPMFinder().find_non_latest_rpms(
                 installed_rpms_for_arch[arch], repodatas, logger=cast(logging.Logger, logger)
             )
+
+            # Per-image ignorable_rpms filtering: filter out RPMs whose name matches entries
+            # in the image's scan_sources.ignorable_rpms config
+            if per_image_ignorable_rpms and non_latest_rpms:
+                filtered_rpms = []
+                for installed_nevra, latest_nevra, repo_name in non_latest_rpms:
+                    # Extract the package name from the installed NEVRA (name-epoch:version-release.arch)
+                    nevr = installed_nevra.rsplit(".", maxsplit=1)[0]
+                    rpm_name = parse_nvr(nevr)['name']
+                    if rpm_name in per_image_ignorable_rpms:
+                        logger.info(
+                            "Ignoring RPM %s for %s (per-image ignorable_rpms config)",
+                            rpm_name,
+                            meta.distgit_key,
+                        )
+                    else:
+                        filtered_rpms.append((installed_nevra, latest_nevra, repo_name))
+                non_latest_rpms = filtered_rpms
+                logger.info(
+                    "After per-image RPM filtering, %d non-latest RPMs remain for %s",
+                    len(non_latest_rpms),
+                    meta.distgit_key,
+                )
+
             if non_latest_rpms:
                 logger.warning('Found outdated RPMs in %s for arch %s', self._build_record.nvr, arch)
                 non_latest_rpms_for_arch[arch] = non_latest_rpms
