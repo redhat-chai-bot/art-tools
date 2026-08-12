@@ -53,7 +53,7 @@ class TestShouldHonorIgnorableRepos(unittest.TestCase):
         self.assertTrue(should_honor_ignorable_repos(runtime, force_ignore=False))
 
     def test_release_phase_with_upcoming_ga_does_not_honor(self):
-        """During release phase with GA within 7 days, should NOT honor ignorable"""
+        """During release phase with GA within 2 days, should NOT honor ignorable"""
         runtime = MagicMock(spec=['group', 'group_config'])
         runtime.group = 'openshift-4.17'
         runtime.group_config = Model({'software_lifecycle': {'phase': 'release'}})
@@ -62,7 +62,7 @@ class TestShouldHonorIgnorableRepos(unittest.TestCase):
             self.assertFalse(should_honor_ignorable_repos(runtime, force_ignore=False))
 
     def test_release_phase_without_upcoming_ga_honors(self):
-        """During release phase without upcoming GA (>7 days away), should honor ignorable"""
+        """During release phase without upcoming GA (>2 days away), should honor ignorable"""
         runtime = MagicMock(spec=['group', 'group_config'])
         runtime.group = 'openshift-4.17'
         runtime.group_config = Model({'software_lifecycle': {'phase': 'release'}})

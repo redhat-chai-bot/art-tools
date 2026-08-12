@@ -374,8 +374,8 @@ def should_honor_ignorable_repos(runtime, force_ignore: bool = False) -> bool:
     Logic:
     1. If force_ignore=True, always honor ignorable repos (return True)
     2. If software_lifecycle.phase != "release", always honor ignorable repos (return True)
-    3. If phase == "release", check if release is scheduled within 7 days:
-       - If release is next week, DO NOT honor ignorable (return False) to allow rebuilds
+    3. If phase == "release", check if release is scheduled within 2 days:
+       - If release is imminent, DO NOT honor ignorable (return False) to allow rebuilds
        - Otherwise, honor ignorable (return True)
 
     :param runtime: Runtime object with group_config and group name
@@ -427,7 +427,7 @@ def should_honor_ignorable_repos(runtime, force_ignore: bool = False) -> bool:
             group_name = runtime.group.split('@')[0]  # Remove commitish if present
             is_release_soon = is_release_next_week(group_name)
             setattr(runtime, cache_key, is_release_soon)
-            LOGGER.info(f"Release schedule check for {group_name}: release within 7 days = {is_release_soon}")
+            LOGGER.info(f"Release schedule check for {group_name}: release within 2 days = {is_release_soon}")
         except Exception as e:
             LOGGER.warning(
                 f"Failed to query release schedule from Product Pages: {e}; defaulting to NOT honoring ignorable repos for safety"
@@ -436,10 +436,10 @@ def should_honor_ignorable_repos(runtime, force_ignore: bool = False) -> bool:
             setattr(runtime, cache_key, is_release_soon)
 
     if is_release_soon:
-        LOGGER.info("Release is scheduled within 7 days: NOT honoring ignorable repos to enable rebuilds for GA")
+        LOGGER.info("Release is scheduled within 2 days: NOT honoring ignorable repos to enable rebuilds for GA")
         return False
     else:
-        LOGGER.info("No release scheduled within 7 days: honoring ignorable repos")
+        LOGGER.info("No release scheduled within 2 days: honoring ignorable repos")
         return True
 
 
