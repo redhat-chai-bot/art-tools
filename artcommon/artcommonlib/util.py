@@ -361,7 +361,7 @@ def is_release_next_week(group):
     )
     for release in release_schedules.json()['all_ga_tasks']:
         release_date = datetime.strptime(release['date_finish'], "%Y-%m-%d").date()
-        if release_date > date.today() and release_date <= date.today() + timedelta(days=7):
+        if release_date > date.today() and release_date <= date.today() + timedelta(days=2):
             return True
     return False
 
