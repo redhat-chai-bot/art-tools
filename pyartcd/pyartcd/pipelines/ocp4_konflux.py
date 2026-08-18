@@ -41,6 +41,7 @@ from pyartcd.util import (
     get_group_images,
     get_group_rpms,
     increment_fail_counter,
+    load_group_config,
     mass_rebuild_score,
     reset_fail_counter,
 )
@@ -883,7 +884,7 @@ class KonfluxOcpPipeline:
     RHCOS_RHEL9_PAIR = {'node': 'rhcos-node-image', 'extensions': 'rhcos-node-extensions'}
     RHCOS_RHEL10_PAIR = {'node': 'rhcos-node-image-rhel10', 'extensions': 'rhcos-node-extensions-rhel10'}
 
-    def trigger_rhcos_integration_tests(self):
+    async def trigger_rhcos_integration_tests(self):
         """Trigger RHCOS-owned Jenkins integration tests for rebuilt node/extensions images.
 
         When any RHCOS images listed in RHCOS_ART_IMAGE_KEYS are rebuilt
@@ -928,6 +929,25 @@ class KonfluxOcpPipeline:
                 if name in RHCOS_ART_IMAGE_KEYS and record['status'] == '0':
                     all_rhcos_records[name] = record.get('image_pullspec', '')
 
+            # Load group config to derive RELEASE streams from group.yml instead of hardcoding
+            group_config = await load_group_config(group=f"openshift-{self.version}", assembly="stream")
+
+            # Build release stream mapping: {rhel_label: release_stream}
+            # e.g. {'rhel9': '4.19-9.8', 'rhel10': '4.19-10.0'}
+            release_streams = {}
+            for tag in group_config.get('rhcos', {}).get('payload_tags', []):
+                rhel_ver = tag.get('rhel_version', '')
+                if rhel_ver:
+                    major = rhel_ver.split('.')[0]
+                    release_streams[f"rhel{major}"] = f"{self.version}-{rhel_ver}"
+
+            # Ensure default RHEL version from group vars is present
+            default_major = group_config['vars']['RHCOS_EL_MAJOR']
+            default_minor = group_config['vars']['RHCOS_EL_MINOR']
+            release_streams.setdefault(f"rhel{default_major}", f"{self.version}-{default_major}.{default_minor}")
+
+            LOGGER.info("RHCOS release streams from group.yml: %s", release_streams)
+
             # Trigger tests for each RHEL version pair that has at least one rebuilt image
             rhel_pairs = [
                 ('rhel9', self.RHCOS_RHEL9_PAIR),
@@ -935,7 +955,7 @@ class KonfluxOcpPipeline:
             ]
 
             for rhel_label, pair in rhel_pairs:
-                self._trigger_rhcos_pair_test(rhel_label, pair, rebuilt_images, all_rhcos_records)
+                self._trigger_rhcos_pair_test(rhel_label, pair, rebuilt_images, all_rhcos_records, release_streams)
 
         except Exception as e:
             LOGGER.exception("Failed to trigger RHCOS integration tests: %s", e)
@@ -946,6 +966,7 @@ class KonfluxOcpPipeline:
         pair: dict,
         rebuilt_images: dict,
         all_rhcos_records: dict,
+        release_streams: dict,
     ):
         """Trigger integration test for a single RHEL version's RHCOS image pair.
 
@@ -954,6 +975,7 @@ class KonfluxOcpPipeline:
             pair: Dict with 'node' and 'extensions' keys mapping to image names.
             rebuilt_images: Dict of {image_name: pullspec} for images that were rebuilt.
             all_rhcos_records: Dict of {image_name: pullspec} for all successful RHCOS builds.
+            release_streams: Dict mapping rhel_label to release stream (e.g. {'rhel9': '4.19-9.8'}).
         """
         node_name = pair['node']
         ext_name = pair['extensions']
@@ -991,13 +1013,11 @@ class KonfluxOcpPipeline:
             )
             return
 
-        # Derive RELEASE param based on RHEL version
-        # TODO: Read RHEL minor version from group.yml vars (RHCOS_EL_MINOR) when self.runtime
-        # exposes group_config. For now, hardcode the expected minor versions.
-        if rhel_label == 'rhel9':
-            release_stream = f"{self.version}-9.8"
-        else:
-            release_stream = f"{self.version}-10.0"
+        # Derive RELEASE param from group.yml (loaded by trigger_rhcos_integration_tests)
+        release_stream = release_streams.get(rhel_label)
+        if not release_stream:
+            LOGGER.warning("No release stream found in group.yml for %s, skipping integration test", rhel_label)
+            return
 
         try:
             from pyartcd.rhcos_jenkins_client import RhcosJenkinsClient
@@ -1244,7 +1264,7 @@ class KonfluxOcpPipeline:
                 )
 
             self.trigger_bundle_build()
-            self.trigger_rhcos_integration_tests()
+            await self.trigger_rhcos_integration_tests()
 
             # Wrap problematic operations to prevent them from blocking each other or clean_up
             await run_safe(self.mirror_images, critical_failures)
