@@ -878,17 +878,21 @@ class KonfluxOcpPipeline:
         except Exception as e:
             LOGGER.exception(f"Failed to trigger bundle build: {e}")
 
+    # RHCOS image pairs grouped by RHEL version for integration testing.
+    # Each pair consists of a node image and its corresponding extensions image.
+    RHCOS_RHEL9_PAIR = {'node': 'rhcos-node-image', 'extensions': 'rhcos-node-extensions'}
+    RHCOS_RHEL10_PAIR = {'node': 'rhcos-node-image-rhel10', 'extensions': 'rhcos-node-extensions-rhel10'}
+
     def trigger_rhcos_integration_tests(self):
         """Trigger RHCOS-owned Jenkins integration tests for rebuilt node/extensions images.
 
         When any RHCOS images listed in RHCOS_ART_IMAGE_KEYS are rebuilt
-        successfully, this method will eventually trigger RHCOS-owned Jenkins
-        integration tests. If those tests pass, it will sync the ART-built
-        node/extensions images to the shadow imagestream tags.
+        successfully, this method triggers RHCOS-owned Jenkins integration tests
+        via the build-node-image job. The tests are triggered independently for
+        each RHEL version (9/10) whose images were rebuilt.
 
-        Currently raises NotImplementedError when RHCOS images were rebuilt, as the
-        integration tests are not yet available. Set --skip-rhcos-integration-tests
-        to bypass (default: True).
+        These are shadow images for now, so test failures are logged as warnings
+        but do not fail the pipeline.
         """
         if self.skip_rhcos_integration_tests:
             LOGGER.warning("Skipping RHCOS integration tests because --skip-rhcos-integration-tests flag is set")
@@ -901,21 +905,129 @@ class KonfluxOcpPipeline:
 
         try:
             records = record_log.get('image_build_konflux', [])
-            rebuilt_rhcos = [
-                record['name']
-                for record in records
-                if record.get('name') in RHCOS_ART_IMAGE_KEYS and record['status'] == '0'
+
+            # Build a lookup of rebuilt RHCOS images: {name: pullspec}
+            rebuilt_images = {}
+            for record in records:
+                name = record.get('name')
+                if name in RHCOS_ART_IMAGE_KEYS and record['status'] == '0':
+                    pullspec = record.get('image_pullspec', '')
+                    rebuilt_images[name] = pullspec
+
+            if not rebuilt_images:
+                LOGGER.info("No RHCOS images were rebuilt, skipping integration tests")
+                return
+
+            LOGGER.info("RHCOS images rebuilt successfully: %s", ', '.join(rebuilt_images.keys()))
+
+            # Build a full lookup of ALL RHCOS image records (including those not rebuilt)
+            # so we can find pullspecs for the pair partner if only one was rebuilt
+            all_rhcos_records = {}
+            for record in records:
+                name = record.get('name')
+                if name in RHCOS_ART_IMAGE_KEYS and record['status'] == '0':
+                    all_rhcos_records[name] = record.get('image_pullspec', '')
+
+            # Trigger tests for each RHEL version pair that has at least one rebuilt image
+            rhel_pairs = [
+                ('rhel9', self.RHCOS_RHEL9_PAIR),
+                ('rhel10', self.RHCOS_RHEL10_PAIR),
             ]
-            if rebuilt_rhcos:
-                LOGGER.info(f"RHCOS images rebuilt successfully: {', '.join(rebuilt_rhcos)}")
-                raise NotImplementedError(
-                    "RHCOS integration tests are not yet implemented. Set --skip-rhcos-integration-tests to bypass."
-                )
-        except NotImplementedError:
-            raise
+
+            for rhel_label, pair in rhel_pairs:
+                self._trigger_rhcos_pair_test(rhel_label, pair, rebuilt_images, all_rhcos_records)
+
         except Exception as e:
-            LOGGER.exception(f"Failed to trigger RHCOS integration tests: {e}")
-            raise
+            LOGGER.exception("Failed to trigger RHCOS integration tests: %s", e)
+
+    def _trigger_rhcos_pair_test(
+        self,
+        rhel_label: str,
+        pair: dict,
+        rebuilt_images: dict,
+        all_rhcos_records: dict,
+    ):
+        """Trigger integration test for a single RHEL version's RHCOS image pair.
+
+        Args:
+            rhel_label: Human-readable label like 'rhel9' or 'rhel10'.
+            pair: Dict with 'node' and 'extensions' keys mapping to image names.
+            rebuilt_images: Dict of {image_name: pullspec} for images that were rebuilt.
+            all_rhcos_records: Dict of {image_name: pullspec} for all successful RHCOS builds.
+        """
+        node_name = pair['node']
+        ext_name = pair['extensions']
+
+        # Check if at least one image in this pair was rebuilt
+        if node_name not in rebuilt_images and ext_name not in rebuilt_images:
+            return
+
+        LOGGER.info("Triggering %s RHCOS integration tests", rhel_label)
+
+        # Resolve pullspecs: prefer from rebuilt, fall back to all records from same run
+        node_pullspec = rebuilt_images.get(node_name) or all_rhcos_records.get(node_name)
+        ext_pullspec = rebuilt_images.get(ext_name) or all_rhcos_records.get(ext_name)
+
+        if not node_pullspec:
+            LOGGER.warning("Cannot trigger %s integration test: no pullspec found for %s", rhel_label, node_name)
+            return
+        if not ext_pullspec:
+            LOGGER.warning("Cannot trigger %s integration test: no pullspec found for %s", rhel_label, ext_name)
+            return
+
+        # Validate that pullspecs are digest-based
+        if '@sha256:' not in node_pullspec:
+            LOGGER.warning(
+                "Node image pullspec is not digest-based, skipping %s integration test: %s",
+                rhel_label,
+                node_pullspec,
+            )
+            return
+        if '@sha256:' not in ext_pullspec:
+            LOGGER.warning(
+                "Extensions image pullspec is not digest-based, skipping %s integration test: %s",
+                rhel_label,
+                ext_pullspec,
+            )
+            return
+
+        # Derive RELEASE param based on RHEL version
+        # TODO: Read RHEL minor version from group.yml vars (RHCOS_EL_MINOR) when self.runtime
+        # exposes group_config. For now, hardcode the expected minor versions.
+        if rhel_label == 'rhel9':
+            release_stream = f"{self.version}-9.8"
+        else:
+            release_stream = f"{self.version}-10.0"
+
+        try:
+            from pyartcd.rhcos_jenkins_client import RhcosJenkinsClient
+
+            client = RhcosJenkinsClient(kubeconfig_env_var='RHCOS_JENKINS_KUBECONFIG')
+            build_number = client.trigger_build(
+                'build-node-image',
+                {
+                    'NODE_IMAGE': node_pullspec,
+                    'EXTENSIONS_IMAGE': ext_pullspec,
+                    'RELEASE': release_stream,
+                },
+            )
+            LOGGER.info("Waiting for %s integration test build-node-image #%d...", rhel_label, build_number)
+            result = client.wait_for_build('build-node-image', build_number)
+
+            if result['result'] == 'SUCCESS':
+                LOGGER.info("RHCOS %s integration test passed: %s #%d", rhel_label, result['url'], build_number)
+            else:
+                LOGGER.warning(
+                    "RHCOS %s integration test did not pass (result=%s): %s - %s",
+                    rhel_label,
+                    result['result'],
+                    result['url'],
+                    result.get('description', ''),
+                )
+
+        except Exception as e:
+            # Don't fail the pipeline for integration test issues - these are shadow images for now
+            LOGGER.warning("Failed to run %s RHCOS integration test: %s", rhel_label, e)
 
     def parse_record_log(self) -> Optional[dict]:
         record_log_path = Path(self.runtime.doozer_working, 'record.log')
