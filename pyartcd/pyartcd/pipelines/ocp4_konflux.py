@@ -21,7 +21,7 @@ from artcommonlib.constants import (
     REGISTRY_QUAY_OPENSHIFT,
     REGISTRY_REDHAT_IO,
 )
-from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome
+from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome, KonfluxBuildRecord
 from artcommonlib.konflux.konflux_db import KonfluxDb
 from artcommonlib.registry_config import RegistryConfig, RegistryCredential
 from artcommonlib.util import (
@@ -996,6 +996,7 @@ class KonfluxOcpPipeline:
         # Fallback: look up the latest successful build from KonfluxDb for the missing partner
         if not node_pullspec or not ext_pullspec:
             db = KonfluxDb()
+            db.bind(KonfluxBuildRecord)
             group = f"openshift-{self.version}"
             if not node_pullspec:
                 LOGGER.info("Looking up latest %s build from KonfluxDb...", node_name)
