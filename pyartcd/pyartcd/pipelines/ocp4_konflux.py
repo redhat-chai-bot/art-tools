@@ -22,6 +22,7 @@ from artcommonlib.constants import (
     REGISTRY_REDHAT_IO,
 )
 from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome
+from artcommonlib.konflux.konflux_db import KonfluxDb
 from artcommonlib.registry_config import RegistryConfig, RegistryCredential
 from artcommonlib.util import (
     new_roundtrip_yaml_handler,
@@ -955,12 +956,14 @@ class KonfluxOcpPipeline:
             ]
 
             for rhel_label, pair in rhel_pairs:
-                self._trigger_rhcos_pair_test(rhel_label, pair, rebuilt_images, all_rhcos_records, release_streams)
+                await self._trigger_rhcos_pair_test(
+                    rhel_label, pair, rebuilt_images, all_rhcos_records, release_streams
+                )
 
         except Exception as e:
             LOGGER.exception("Failed to trigger RHCOS integration tests: %s", e)
 
-    def _trigger_rhcos_pair_test(
+    async def _trigger_rhcos_pair_test(
         self,
         rhel_label: str,
         pair: dict,
@@ -989,6 +992,39 @@ class KonfluxOcpPipeline:
         # Resolve pullspecs: prefer from rebuilt, fall back to all records from same run
         node_pullspec = rebuilt_images.get(node_name) or all_rhcos_records.get(node_name)
         ext_pullspec = rebuilt_images.get(ext_name) or all_rhcos_records.get(ext_name)
+
+        # Fallback: look up the latest successful build from KonfluxDb for the missing partner
+        if not node_pullspec or not ext_pullspec:
+            db = KonfluxDb()
+            group = f"openshift-{self.version}"
+            if not node_pullspec:
+                LOGGER.info("Looking up latest %s build from KonfluxDb...", node_name)
+                record = await db.get_latest_build(
+                    name=node_name,
+                    group=group,
+                    outcome=KonfluxBuildOutcome.SUCCESS,
+                    assembly=self.assembly,
+                    exclude_large_columns=True,
+                )
+                if record:
+                    node_pullspec = record.image_pullspec
+                    LOGGER.info("Found latest %s pullspec from KonfluxDb: %s", node_name, node_pullspec)
+                else:
+                    LOGGER.warning("No successful %s build found in KonfluxDb for group %s", node_name, group)
+            if not ext_pullspec:
+                LOGGER.info("Looking up latest %s build from KonfluxDb...", ext_name)
+                record = await db.get_latest_build(
+                    name=ext_name,
+                    group=group,
+                    outcome=KonfluxBuildOutcome.SUCCESS,
+                    assembly=self.assembly,
+                    exclude_large_columns=True,
+                )
+                if record:
+                    ext_pullspec = record.image_pullspec
+                    LOGGER.info("Found latest %s pullspec from KonfluxDb: %s", ext_name, ext_pullspec)
+                else:
+                    LOGGER.warning("No successful %s build found in KonfluxDb for group %s", ext_name, group)
 
         if not node_pullspec:
             LOGGER.warning("Cannot trigger %s integration test: no pullspec found for %s", rhel_label, node_name)
