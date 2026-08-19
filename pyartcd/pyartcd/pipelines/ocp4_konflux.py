@@ -1378,8 +1378,7 @@ class KonfluxOcpPipeline:
     "--skip-ec-verify", is_flag=True, default=False, help="Skip Enterprise Contract verification for built images"
 )
 @click.option(
-    "--skip-rhcos-integration-tests",
-    is_flag=True,
+    "--skip-rhcos-integration-tests/--no-skip-rhcos-integration-tests",
     default=True,
     help="Skip RHCOS integration tests (default: True, tests not yet available)",
 )
