@@ -35,6 +35,31 @@ from pyartcd.mail import MailService
 logger = logging.getLogger(__name__)
 
 
+def get_package_owner(advisory_config: dict, group: str) -> str:
+    """Return the package_owner email based on the release's software lifecycle.
+
+    EUS (Extended Update Support) releases use ``package_owner_eus`` when
+    configured; all other releases use the default ``package_owner``.
+    In OpenShift, even minor versions (4.14, 4.16, 4.18, …) are EUS.
+
+    Falls back to ``package_owner`` when ``package_owner_eus`` is not set,
+    preserving backward compatibility with existing configurations.
+
+    :param advisory_config: The ``[advisory]`` section from runtime config.
+    :param group: Group name, e.g. ``openshift-4.18``.
+    :return: The package_owner email address.
+    """
+    from artcommonlib.util import get_ocp_version_from_group
+
+    _, minor = get_ocp_version_from_group(group)
+    is_eus = minor % 2 == 0
+    if is_eus:
+        eus_owner = advisory_config.get('package_owner_eus')
+        if eus_owner:
+            return eus_owner
+    return advisory_config['package_owner']
+
+
 def isolate_el_version_in_release(release: str) -> Optional[int]:
     """
     Given a release field, determines whether is contains

@@ -69,6 +69,7 @@ from pyartcd.slack import SlackClient
 from pyartcd.util import (
     get_assembly_basis,
     get_assembly_type,
+    get_package_owner,
     get_release_name_for_assembly,
     nightlies_with_pullspecs,
 )
@@ -560,13 +561,14 @@ class PrepareReleaseKonfluxPipeline:
         self, advisory_type: str, art_advisory_key: str, release_date: str, batch_id: int = 0
     ) -> int:
         self.logger.info("Creating advisory with type %s art_advisory_key %s ...", advisory_type, art_advisory_key)
+        package_owner = get_package_owner(self.runtime.config['advisory'], self.group)
         create_cmd = self._elliott_base_command + [
             "create",
             f"--type={advisory_type}",
             f"--art-advisory-key={art_advisory_key}",
             f"--assigned-to={self.runtime.config['advisory']['assigned_to']}",
             f"--manager={self.runtime.config['advisory']['manager']}",
-            f"--package-owner={self.runtime.config['advisory']['package_owner']}",
+            f"--package-owner={package_owner}",
         ]
         if batch_id:
             create_cmd.append(f"--batch-id={batch_id}")

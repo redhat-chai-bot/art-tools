@@ -378,3 +378,23 @@ class TestUtil(IsolatedAsyncioTestCase):
         mock_get_keys.return_value = []
         result = await util.get_counter_failures('ec-failure', 'openshift-4.21')
         self.assertEqual(result, {})
+
+    def test_get_package_owner_eus(self):
+        """EUS (even minor) release should use package_owner_eus when configured."""
+        config = {'package_owner': 'default@redhat.com', 'package_owner_eus': 'eus@redhat.com'}
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.18'), 'eus@redhat.com')
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.16'), 'eus@redhat.com')
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.14'), 'eus@redhat.com')
+
+    def test_get_package_owner_non_eus(self):
+        """Non-EUS (odd minor) release should use default package_owner."""
+        config = {'package_owner': 'default@redhat.com', 'package_owner_eus': 'eus@redhat.com'}
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.17'), 'default@redhat.com')
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.19'), 'default@redhat.com')
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.15'), 'default@redhat.com')
+
+    def test_get_package_owner_no_eus_config(self):
+        """When package_owner_eus is not configured, fall back to package_owner for all releases."""
+        config = {'package_owner': 'default@redhat.com'}
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.18'), 'default@redhat.com')
+        self.assertEqual(util.get_package_owner(config, 'openshift-4.17'), 'default@redhat.com')
