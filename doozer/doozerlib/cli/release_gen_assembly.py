@@ -15,10 +15,7 @@ from artcommonlib.konflux.package_rpm_finder import PackageRpmFinder
 from artcommonlib.model import Missing
 from artcommonlib.ocp_version_ancestry import calc_upgrade_sources_async
 from artcommonlib.release_util import isolate_el_version_in_release
-from artcommonlib.util import (
-    get_art_prod_image_repo_for_version,
-    get_assembly_release_date,
-)
+from artcommonlib.util import get_assembly_release_date
 from requests.adapters import HTTPAdapter
 from ruamel.yaml import YAML
 from semver import VersionInfo
@@ -595,10 +592,7 @@ class GenAssemblyCli:
                             "amd64",
                             registry_config=self.runtime.registry_config,
                         )
-                        # NOTE: RHCOS images are currently always in ocp-v4.0-art-dev, even for OCP 5.x.
-                        # When RHCOS 5.x images exist in their own repository, this should be updated to
-                        # use the actual OCP major version: get_art_prod_image_repo_for_version(major, "dev")
-                        art_repo = get_art_prod_image_repo_for_version(4, "dev")
+                        art_repo = rhcos.get_primary_container_conf(self.runtime).rhel_build_id_index.rsplit(":", 1)[0]
                         rhcos_info = util.oc_image_info_for_arch(
                             f"{art_repo}:{amd64_rhcos_info['config']['config']['Labels']['coreos.build.manifest-list-tag']}",
                             go_arch_for_brew_arch(arch),

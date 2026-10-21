@@ -8,6 +8,60 @@ from flexmock import flexmock
 
 
 class TestGenAssemblyCli(TestCase):
+    @patch('doozerlib.cli.release_gen_assembly.util.oc_image_info_for_arch')
+    def test_get_layered_rhcos_container_uses_primary_config_repo(self, mock_image_info):
+        for repo in (
+            "quay.io/redhat-user-workloads/ocp-art-tenant/art-images",
+            "quay.io/openshift-release-dev/ocp-v4.0-art-dev",
+            "registry.example.com:5000/rhcos/images",
+        ):
+            with self.subTest(repo=repo):
+                runtime = MagicMock()
+                runtime.group_config = Model(
+                    {
+                        "arches": ["x86_64", "aarch64"],
+                        "rhcos": {
+                            "layered_rhcos": True,
+                            "payload_tags": [
+                                {
+                                    "name": "extensions",
+                                    "rhel_build_id_index": "quay.io/other/repo:extensions",
+                                },
+                                {
+                                    "name": "machine-os-content",
+                                    "primary": True,
+                                    "rhel_build_id_index": f"{repo}:5.1-9.8-node-image",
+                                },
+                            ],
+                        },
+                    }
+                )
+                gacli = GenAssemblyCli(runtime=runtime)
+                gacli.rhcos_version = "5.1.202610210000-0"
+                gacli.rhcos_by_tag = {
+                    "extensions": {"x86_64": "quay.io/nightly/extensions@sha256:amd64"},
+                    "machine-os-content": {"x86_64": "quay.io/nightly/node@sha256:amd64"},
+                }
+                mock_image_info.reset_mock()
+                mock_image_info.side_effect = [
+                    {"config": {"config": {"Labels": {"coreos.build.manifest-list-tag": "extensions-tag"}}}},
+                    {"digest": "sha256:extensions-arm64"},
+                    {"config": {"config": {"Labels": {"coreos.build.manifest-list-tag": "node-tag"}}}},
+                    {"digest": "sha256:node-arm64"},
+                ]
+
+                gacli._get_rhcos_container()
+
+                self.assertEqual(mock_image_info.call_count, 4)
+                for tag_name, manifest_tag, digest in (
+                    ("extensions", "extensions-tag", "sha256:extensions-arm64"),
+                    ("machine-os-content", "node-tag", "sha256:node-arm64"),
+                ):
+                    mock_image_info.assert_any_call(
+                        f"{repo}:{manifest_tag}", "arm64", registry_config=runtime.registry_config
+                    )
+                    self.assertEqual(gacli.rhcos_by_tag[tag_name]["aarch64"], f"{repo}@{digest}")
+
     def test_initialize_assembly_type(self):
         """
         Check that the correct assembly type is set, according to
