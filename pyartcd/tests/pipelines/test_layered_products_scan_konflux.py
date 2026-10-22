@@ -432,6 +432,50 @@ class TestScanForMissingBundlesFbcs(unittest.IsolatedAsyncioTestCase):
                 await pipeline.scan_for_missing_bundles_fbcs()
             self.assertIn('BigQuery timeout', str(ctx.exception))
 
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.load_group_config', new_callable=AsyncMock)
+    async def test_ocp_target_versions_loaded(self, mock_load_group_config):
+        """OCP_TARGET_VERSIONS should be loaded from group config and stored on the pipeline."""
+        mock_load_group_config.return_value = {'OCP_TARGET_VERSIONS': ['4.14', '4.15']}
+        pipeline = self._make_pipeline()
+
+        await pipeline.load_ocp_target_versions()
+
+        self.assertEqual(pipeline.ocp_target_versions, ['4.14', '4.15'])
+
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.load_group_config', new_callable=AsyncMock)
+    async def test_ocp_target_versions_not_set(self, mock_load_group_config):
+        """When OCP_TARGET_VERSIONS is not in group config, ocp_target_versions should be empty."""
+        mock_load_group_config.return_value = {'some_other_key': 'value'}
+        pipeline = self._make_pipeline()
+
+        await pipeline.load_ocp_target_versions()
+
+        self.assertEqual(pipeline.ocp_target_versions, [])
+
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.load_group_config', new_callable=AsyncMock)
+    async def test_ocp_target_versions_load_failure_handled(self, mock_load_group_config):
+        """If loading group config fails, ocp_target_versions should default to empty."""
+        mock_load_group_config.side_effect = RuntimeError('doozer failed')
+        pipeline = self._make_pipeline()
+
+        await pipeline.load_ocp_target_versions()
+
+        self.assertEqual(pipeline.ocp_target_versions, [])
+
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.load_group_config', new_callable=AsyncMock)
+    async def test_scan_loads_ocp_target_versions(self, mock_load_group_config):
+        """scan_for_missing_bundles_fbcs should call load_ocp_target_versions."""
+        mock_load_group_config.return_value = {'OCP_TARGET_VERSIONS': ['4.14']}
+        pipeline = self._make_pipeline()
+
+        with (
+            patch.object(pipeline, 'load_operator_names', new_callable=AsyncMock, return_value={'oadp-operator'}),
+            patch.object(pipeline, 'get_latest_operator_builds', new_callable=AsyncMock, return_value=[]),
+        ):
+            await pipeline.scan_for_missing_bundles_fbcs()
+
+        self.assertEqual(pipeline.ocp_target_versions, ['4.14'])
+
 
 class TestDeduplication(unittest.IsolatedAsyncioTestCase):
     """Tests for the deduplication logic: operators already being rebuilt
@@ -739,7 +783,8 @@ class TestTriggerBuilds(unittest.TestCase):
         return_value='build-fbc-oadp-1-5-abc',
     )
     @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.is_tekton_context', return_value=True)
-    def test_trigger_fbc_builds_tekton(self, _mock_ctx, mock_start, mock_annotate):
+    def test_trigger_fbc_builds_tekton_no_target_versions(self, _mock_ctx, mock_start, mock_annotate):
+        """When ocp_target_versions is empty, a single build-fbc PipelineRun is created (no ocp-target-version)."""
         pipeline = self._make_pipeline()
         operators = [_make_operator(nvr='op-1')]
 
@@ -776,9 +821,68 @@ class TestTriggerBuilds(unittest.TestCase):
             doozer_data_gitref='',
         )
 
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.annotate_current_pipelinerun')
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.start_pipeline_run')
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.is_tekton_context', return_value=True)
+    def test_trigger_fbc_builds_tekton_multiple_target_versions(self, _mock_ctx, mock_start, mock_annotate):
+        """With multiple OCP target versions, a separate PipelineRun is created for each."""
+        pipeline = self._make_pipeline()
+        pipeline.ocp_target_versions = ['4.14', '4.15', '4.16']
+        operators = [_make_operator(nvr='op-1')]
+
+        mock_start.side_effect = [
+            'build-fbc-oadp-1-5-v414',
+            'build-fbc-oadp-1-5-v415',
+            'build-fbc-oadp-1-5-v416',
+        ]
+
+        pipeline.trigger_fbc_builds(operators)
+
+        self.assertEqual(mock_start.call_count, 3)
+        for i, tv in enumerate(['4.14', '4.15', '4.16']):
+            call_params = mock_start.call_args_list[i].kwargs['params']
+            self.assertEqual(call_params['ocp-target-version'], tv)
+            self.assertEqual(call_params['force'], 'true')
+
+        self.assertEqual(mock_annotate.call_count, 3)
+        mock_annotate.assert_any_call({'art.openshift.io/triggered-build-fbc-4.14': 'build-fbc-oadp-1-5-v414'})
+        mock_annotate.assert_any_call({'art.openshift.io/triggered-build-fbc-4.15': 'build-fbc-oadp-1-5-v415'})
+        mock_annotate.assert_any_call({'art.openshift.io/triggered-build-fbc-4.16': 'build-fbc-oadp-1-5-v416'})
+
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.annotate_current_pipelinerun')
+    @patch(
+        'pyartcd.pipelines.layered_products_scan_konflux.tekton.start_pipeline_run',
+        return_value='build-fbc-oadp-1-5-v414',
+    )
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.is_tekton_context', return_value=True)
+    def test_trigger_fbc_builds_tekton_single_target_version(self, _mock_ctx, mock_start, mock_annotate):
+        """With a single OCP target version, one PipelineRun is created with ocp-target-version."""
+        pipeline = self._make_pipeline()
+        pipeline.ocp_target_versions = ['4.14']
+        operators = [_make_operator(nvr='op-1')]
+
+        pipeline.trigger_fbc_builds(operators)
+
+        mock_start.assert_called_once_with(
+            pipeline_name='build-fbc',
+            params={
+                'version': '1.5',
+                'assembly': 'stream',
+                'group': 'oadp-1.5',
+                'operator-nvrs': 'op-1',
+                'data-path': 'https://github.com/openshift-eng/ocp-build-data',
+                'data-gitref': '',
+                'dry-run': 'false',
+                'ocp-target-version': '4.14',
+                'force': 'true',
+            },
+        )
+        mock_annotate.assert_called_once_with({'art.openshift.io/triggered-build-fbc-4.14': 'build-fbc-oadp-1-5-v414'})
+
     @patch('pyartcd.pipelines.layered_products_scan_konflux.jenkins.start_build_fbc')
     @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.is_tekton_context', return_value=False)
-    def test_trigger_fbc_builds_jenkins(self, _mock_ctx, mock_jenkins_start):
+    def test_trigger_fbc_builds_jenkins_no_target_versions(self, _mock_ctx, mock_jenkins_start):
+        """Jenkins fallback: no target versions triggers a single build-fbc."""
         pipeline = self._make_pipeline()
         operators = [_make_operator(nvr='op-1')]
 
@@ -790,6 +894,36 @@ class TestTriggerBuilds(unittest.TestCase):
             operator_nvrs=['op-1'],
             dry_run=False,
             group='oadp-1.5',
+        )
+
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.jenkins.start_build_fbc')
+    @patch('pyartcd.pipelines.layered_products_scan_konflux.tekton.is_tekton_context', return_value=False)
+    def test_trigger_fbc_builds_jenkins_multiple_target_versions(self, _mock_ctx, mock_jenkins_start):
+        """Jenkins fallback: with target versions triggers one build-fbc per version."""
+        pipeline = self._make_pipeline()
+        pipeline.ocp_target_versions = ['4.14', '4.15']
+        operators = [_make_operator(nvr='op-1')]
+
+        pipeline.trigger_fbc_builds(operators)
+
+        self.assertEqual(mock_jenkins_start.call_count, 2)
+        mock_jenkins_start.assert_any_call(
+            version='1.5',
+            assembly='stream',
+            operator_nvrs=['op-1'],
+            dry_run=False,
+            group='oadp-1.5',
+            ocp_target_version='4.14',
+            force_build=True,
+        )
+        mock_jenkins_start.assert_any_call(
+            version='1.5',
+            assembly='stream',
+            operator_nvrs=['op-1'],
+            dry_run=False,
+            group='oadp-1.5',
+            ocp_target_version='4.15',
+            force_build=True,
         )
 
     def test_trigger_bundle_builds_dry_run(self):

@@ -19,6 +19,7 @@ from pyartcd import constants, jenkins, locks, tekton, util
 from pyartcd.cli import cli, click_coroutine, pass_runtime
 from pyartcd.locks import Lock
 from pyartcd.runtime import Runtime
+from pyartcd.util import load_group_config
 
 
 class LayeredProductsScanPipeline:
@@ -46,6 +47,9 @@ class LayeredProductsScanPipeline:
 
         # Populated by load_operator_names(): distgit_key -> bundle short name
         self.bundle_names_by_operator: Dict[str, str] = {}
+
+        # OCP target versions for FBC builds (loaded from group config)
+        self.ocp_target_versions: List[str] = []
 
         # Extract version from group name (e.g. 'oadp-1.5' -> '1.5')
         version_tuple = product_version_from_group_name(self.group)
@@ -216,6 +220,9 @@ class LayeredProductsScanPipeline:
             self.logger.info('No operators found in group %s; skipping bundle/FBC scan', self.group)
             return
 
+        # Load OCP target versions for multi-version FBC builds
+        await self.load_ocp_target_versions()
+
         operator_builds = await self.get_latest_operator_builds(operator_db, operator_names)
         self.logger.info('Found %d operators with latest successful builds', len(operator_builds))
 
@@ -276,6 +283,34 @@ class LayeredProductsScanPipeline:
                     self.bundle_names_by_operator[distgit_key] = bundle_name
 
         return set(self.bundle_names_by_operator.keys())
+
+    async def load_ocp_target_versions(self):
+        """Load OCP_TARGET_VERSIONS from group config for multi-version FBC builds.
+
+        Layered product groups (e.g. oadp-1.5) may define ``OCP_TARGET_VERSIONS``
+        in their group.yml to specify which OCP versions they target.  When set,
+        ``trigger_fbc_builds`` creates a separate ``build-fbc`` PipelineRun for
+        each target version (mirroring the olm-bundle-konflux pattern).
+        """
+
+        try:
+            group_config = await load_group_config(
+                group=self.group,
+                assembly=self.assembly,
+                doozer_data_path=self.data_path,
+                doozer_data_gitref=self.data_gitref,
+            )
+            ocp_versions = group_config.get('OCP_TARGET_VERSIONS')
+            if ocp_versions:
+                self.ocp_target_versions = list(ocp_versions)
+                self.logger.info('OCP_TARGET_VERSIONS from group config: %s', self.ocp_target_versions)
+            else:
+                self.logger.info('No OCP_TARGET_VERSIONS defined for group %s', self.group)
+        except Exception:
+            self.logger.warning(
+                'Failed to load group config for OCP_TARGET_VERSIONS; falling back to single FBC build', exc_info=True
+            )
+            self.ocp_target_versions = []
 
     async def get_latest_operator_builds(
         self, operator_db: KonfluxDb, operator_names: Set[str]
@@ -454,7 +489,15 @@ class LayeredProductsScanPipeline:
             )
 
     def trigger_fbc_builds(self, operators: List[KonfluxBuildRecord]):
-        """Trigger FBC builds for multiple operators in one job."""
+        """Trigger FBC builds for operators, one per OCP target version.
+
+        When ``self.ocp_target_versions`` is populated (from the group
+        config's ``OCP_TARGET_VERSIONS``), a separate ``build-fbc``
+        PipelineRun is started for each target version – mirroring the
+        olm-bundle-konflux pattern.  Without target versions the method
+        falls back to a single PipelineRun (no ``ocp-target-version``
+        param).
+        """
 
         nvrs = [op.nvr for op in operators]
 
@@ -463,29 +506,64 @@ class LayeredProductsScanPipeline:
             return
 
         self.logger.info('Triggering FBC builds for %d operators', len(nvrs))
-        if tekton.is_tekton_context():
-            created_name = tekton.start_pipeline_run(
-                pipeline_name='build-fbc',
-                params={
-                    'version': self.version,
-                    'assembly': self.assembly,
-                    'group': self.group,
-                    'operator-nvrs': ','.join(nvrs),
-                    'data-path': self.data_path or '',
-                    'data-gitref': self.data_gitref or '',
-                    'dry-run': 'false',
-                },
-            )
-            if created_name:
-                tekton.annotate_current_pipelinerun({'art.openshift.io/triggered-build-fbc': created_name})
+
+        if self.ocp_target_versions:
+            self.logger.info('Starting FBC builds for OCP target versions: %s', self.ocp_target_versions)
+            for target_version in self.ocp_target_versions:
+                self.logger.info('Triggering build-fbc for ocp-target-version=%s', target_version)
+                if tekton.is_tekton_context():
+                    created_name = tekton.start_pipeline_run(
+                        pipeline_name='build-fbc',
+                        params={
+                            'version': self.version,
+                            'assembly': self.assembly,
+                            'group': self.group,
+                            'operator-nvrs': ','.join(nvrs),
+                            'data-path': self.data_path or '',
+                            'data-gitref': self.data_gitref or '',
+                            'dry-run': 'false',
+                            'ocp-target-version': target_version,
+                            'force': 'true',
+                        },
+                    )
+                    if created_name:
+                        tekton.annotate_current_pipelinerun(
+                            {f'art.openshift.io/triggered-build-fbc-{target_version}': created_name}
+                        )
+                else:
+                    jenkins.start_build_fbc(
+                        version=self.version,
+                        assembly=self.assembly,
+                        operator_nvrs=nvrs,
+                        dry_run=False,
+                        group=self.group,
+                        ocp_target_version=target_version,
+                        force_build=True,
+                    )
         else:
-            jenkins.start_build_fbc(
-                version=self.version,
-                assembly=self.assembly,
-                operator_nvrs=nvrs,
-                dry_run=False,
-                group=self.group,
-            )
+            if tekton.is_tekton_context():
+                created_name = tekton.start_pipeline_run(
+                    pipeline_name='build-fbc',
+                    params={
+                        'version': self.version,
+                        'assembly': self.assembly,
+                        'group': self.group,
+                        'operator-nvrs': ','.join(nvrs),
+                        'data-path': self.data_path or '',
+                        'data-gitref': self.data_gitref or '',
+                        'dry-run': 'false',
+                    },
+                )
+                if created_name:
+                    tekton.annotate_current_pipelinerun({'art.openshift.io/triggered-build-fbc': created_name})
+            else:
+                jenkins.start_build_fbc(
+                    version=self.version,
+                    assembly=self.assembly,
+                    operator_nvrs=nvrs,
+                    dry_run=False,
+                    group=self.group,
+                )
 
     def get_bundle_name(self, operator_name: str) -> str:
         """Get bundle name from operator name.
