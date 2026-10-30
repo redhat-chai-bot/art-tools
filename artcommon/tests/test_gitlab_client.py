@@ -208,6 +208,20 @@ if __name__ == "__main__":
 
 class TestAddMrLabels(unittest.TestCase):
     @patch("artcommonlib.gitlab.gitlab.Gitlab")
+    def test_add_and_remove_labels_in_one_request(self, gitlab_class):
+        from artcommonlib.gitlab import GitLabClient
+
+        client = GitLabClient("https://gitlab.example.com", "fake-token")
+        client.add_mr_labels(
+            "https://gitlab.example.com/group/project/-/merge_requests/42",
+            ["advisory-transition-fail"],
+            remove_labels=["advisory-transition-in-progress"],
+        )
+        gitlab_class.return_value.projects.get.return_value.mergerequests.update.assert_called_once_with(
+            42, add_labels="advisory-transition-fail", remove_labels="advisory-transition-in-progress"
+        )
+
+    @patch("artcommonlib.gitlab.gitlab.Gitlab")
     def test_adds_labels_without_replacing_existing_labels_or_fetching_mr(self, gitlab_class):
         from artcommonlib.gitlab import GitLabClient
 

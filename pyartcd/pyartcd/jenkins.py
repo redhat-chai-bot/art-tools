@@ -704,10 +704,11 @@ def start_verify_release(version: str, assembly: str, **kwargs) -> Optional[str]
     )
 
 
-def start_verify_advisory_transition(version: str, assembly: str, **kwargs) -> Optional[str]:
+def start_verify_advisory_transition(version: str, assembly: str, shipment_mr_iid: int, **kwargs) -> Optional[str]:
     params = {
         'BUILD_VERSION': version,
         'ASSEMBLY': assembly,
+        'SHIPMENT_MR_IID': shipment_mr_iid,
     }
     return start_build(
         job=Jobs.VERIFY_ADVISORY_TRANSITION,

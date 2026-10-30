@@ -391,9 +391,9 @@ class TestTektonJenkinsStartBuild(unittest.TestCase):
 class TestStartVerifyAdvisoryTransition(unittest.TestCase):
     @mock.patch("pyartcd.jenkins.start_build")
     def test_start_verify_advisory_transition(self, start_build):
-        jenkins.start_verify_advisory_transition("4.22", "4.22.9", block_until_building=False)
+        jenkins.start_verify_advisory_transition("4.22", "4.22.9", 42, block_until_building=False)
         start_build.assert_called_once_with(
             job=Jobs.VERIFY_ADVISORY_TRANSITION,
-            params={"BUILD_VERSION": "4.22", "ASSEMBLY": "4.22.9"},
+            params={"BUILD_VERSION": "4.22", "ASSEMBLY": "4.22.9", "SHIPMENT_MR_IID": 42},
             block_until_building=False,
         )

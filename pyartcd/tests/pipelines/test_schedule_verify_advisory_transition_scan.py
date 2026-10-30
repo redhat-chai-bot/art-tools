@@ -2,6 +2,15 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 from pyartcd.pipelines.scheduled.schedule_verify_advisory_transition_scan import scan_and_trigger
+from pyartcd.pipelines.verify_advisory_transition import (
+    ADVISORY_TRANSITION_FAIL_LABEL as FAIL,
+)
+from pyartcd.pipelines.verify_advisory_transition import (
+    ADVISORY_TRANSITION_PENDING_LABEL as PENDING,
+)
+from pyartcd.pipelines.verify_advisory_transition import (
+    ADVISORY_TRANSITION_SUCCESS_LABEL as SUCCESS,
+)
 
 MODULE = "pyartcd.pipelines.scheduled.schedule_verify_advisory_transition_scan"
 
@@ -33,8 +42,8 @@ class TestScheduleVerifyAdvisoryTransitionScan(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(
             self.trigger.call_args_list,
             [
-                call(version="4.22", assembly="4.22.9", block_until_building=False),
-                call(version="4.22", assembly="4.22.10", block_until_building=False),
+                call(version="4.22", assembly="4.22.9", shipment_mr_iid=42, block_until_building=False),
+                call(version="4.22", assembly="4.22.10", shipment_mr_iid=42, block_until_building=False),
             ],
         )
 
@@ -53,6 +62,7 @@ class TestScheduleVerifyAdvisoryTransitionScan(unittest.IsolatedAsyncioTestCase)
         ]
         await scan_and_trigger(self.runtime)
         self.trigger.assert_not_called()
+        self.gitlab.add_mr_labels.assert_not_called()
 
     async def test_dry_run_never_queues(self):
         self.runtime.dry_run = True
@@ -74,4 +84,79 @@ class TestScheduleVerifyAdvisoryTransitionScan(unittest.IsolatedAsyncioTestCase)
     async def test_no_candidates(self):
         self.gitlab.list_merge_requests.return_value = []
         await scan_and_trigger(self.runtime)
+        self.trigger.assert_not_called()
+
+    async def test_all_terminal_and_reserved_shipments_are_skipped(self):
+        for label in (SUCCESS, FAIL, PENDING):
+            self.gitlab.list_merge_requests.return_value = [make_mr(labels=["verify-release-success", label])]
+            await scan_and_trigger(self.runtime)
+        self.trigger.assert_not_called()
+        self.gitlab.add_mr_labels.assert_not_called()
+
+    async def test_reservation_precedes_enqueue_and_blocks_queued_and_running_rescans(self):
+        shipment = make_mr()
+        self.gitlab.list_merge_requests.return_value = [shipment]
+
+        def reserve(url, labels, remove_labels=None):
+            shipment.labels = list((set(shipment.labels) | set(labels)) - set(remove_labels or []))
+
+        def enqueue(**kwargs):
+            self.assertIn(PENDING, shipment.labels)
+
+        self.gitlab.add_mr_labels.side_effect = reserve
+        self.trigger.side_effect = enqueue
+        await scan_and_trigger(self.runtime)
+        await scan_and_trigger(self.runtime)
+        await scan_and_trigger(self.runtime)
+        self.trigger.assert_called_once()
+
+    async def test_enqueue_failure_is_terminal_and_manual_removal_allows_retry(self):
+        shipment = make_mr()
+        self.gitlab.list_merge_requests.return_value = [shipment]
+        self.gitlab.get_mr_from_url.return_value = shipment
+
+        def update(url, labels, remove_labels=None):
+            shipment.labels = list((set(shipment.labels) | set(labels)) - set(remove_labels or []))
+
+        self.gitlab.add_mr_labels.side_effect = update
+        self.trigger.side_effect = RuntimeError("Jenkins unavailable")
+        await scan_and_trigger(self.runtime)
+        self.assertIn(FAIL, shipment.labels)
+        self.assertNotIn(PENDING, shipment.labels)
+        await scan_and_trigger(self.runtime)
+        self.trigger.assert_called_once()
+        shipment.labels.remove(FAIL)
+        self.trigger.side_effect = None
+        await scan_and_trigger(self.runtime)
+        self.assertEqual(self.trigger.call_count, 2)
+
+    async def test_reservation_failure_never_enqueues(self):
+        self.gitlab.list_merge_requests.return_value = [make_mr()]
+        self.gitlab.add_mr_labels.side_effect = RuntimeError("GitLab unavailable")
+        await scan_and_trigger(self.runtime)
+        self.trigger.assert_not_called()
+
+    async def test_enqueue_and_terminal_persistence_failure_leave_reservation(self):
+        shipment = make_mr(labels=["verify-release-success", "unrelated"])
+        self.gitlab.list_merge_requests.return_value = [shipment]
+        self.gitlab.get_mr_from_url.return_value = shipment
+
+        def update(url, labels, remove_labels=None):
+            if remove_labels:
+                raise RuntimeError("GitLab unavailable")
+            shipment.labels.extend(labels)
+
+        self.gitlab.add_mr_labels.side_effect = update
+        self.trigger.side_effect = RuntimeError("Jenkins unavailable")
+        await scan_and_trigger(self.runtime)
+        self.assertIn(PENDING, shipment.labels)
+        self.assertIn("unrelated", shipment.labels)
+        await scan_and_trigger(self.runtime)
+        self.trigger.assert_called_once()
+
+    async def test_dry_run_failure_does_not_consume_attempt(self):
+        self.runtime.dry_run = True
+        self.gitlab.list_merge_requests.return_value = [make_mr()]
+        await scan_and_trigger(self.runtime)
+        self.gitlab.add_mr_labels.assert_not_called()
         self.trigger.assert_not_called()
